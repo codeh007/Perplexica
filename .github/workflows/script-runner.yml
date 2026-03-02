@@ -51,14 +51,19 @@ jobs:
           anon_key=$(echo "$context_json" | jq -r '.anon_key')
           callback_token=$(echo "$context_json" | jq -r '.callback_token')
           
+          # 修复：调用 handle_github_action_callback 而不是 handle_code_run_callback
+          # 并且使用正确的参数格式
           if [ -n "$callback_url" ] && [ "$callback_url" != "null" ]; then
+            # 替换 handle_code_run_callback 为 handle_github_action_callback
+            callback_url="${callback_url/handle_code_run_callback/handle_github_action_callback}"
+            
             curl -X POST "$callback_url" \
               -H "Content-Type: application/json" \
               -H "Authorization: Bearer $anon_key" \
               -H "apikey: $anon_key" \
               -d "{
                 \"p_token\": \"$callback_token\",
-                \"p_result\": {
+                \"p_payload\": {
                   \"status\": \"success\",
                   \"logs\": $(echo '${{ steps.run_script.outputs.output }}' | jq -Rs .),
                   \"duration\": ${{ steps.run_script.outputs.duration }},
@@ -76,14 +81,17 @@ jobs:
           callback_token=$(echo "$context_json" | jq -r '.callback_token')
           
           if [ -n "$callback_url" ] && [ "$callback_url" != "null" ]; then
+            # 替换 handle_code_run_callback 为 handle_github_action_callback
+            callback_url="${callback_url/handle_code_run_callback/handle_github_action_callback}"
+            
             curl -X POST "$callback_url" \
               -H "Content-Type: application/json" \
               -H "Authorization: Bearer $anon_key" \
               -H "apikey: $anon_key" \
               -d "{
                 \"p_token\": \"$callback_token\",
-                \"p_result\": {
-                  \"status\": \"failure\",
+                \"p_payload\": {
+                  \"status\": \"error\",
                   \"logs\": $(echo '${{ steps.run_script.outputs.output }}' | jq -Rs .),
                   \"error\": \"Script execution failed with exit code ${{ steps.run_script.outputs.exit_code }}\",
                   \"duration\": ${{ steps.run_script.outputs.duration }},
