@@ -13,6 +13,26 @@ on:
         required: false
         type: string
         default: '{}'
+      supabase_url:
+        description: 'Supabase URL override'
+        required: false
+        type: string
+        default: ''
+      anon_key:
+        description: 'Supabase anon key override'
+        required: false
+        type: string
+        default: ''
+      callback_token:
+        description: 'Callback token override'
+        required: false
+        type: string
+        default: ''
+      callback_url:
+        description: 'Callback url override'
+        required: false
+        type: string
+        default: ''
 
 jobs:
   run-script:
@@ -29,9 +49,10 @@ jobs:
         env:
           INPUT_SCRIPT: ${{ inputs.script }}
           INPUT_CONTEXT: ${{ inputs.context }}
-          SUPABASE_URL: ${{ fromJson(inputs.context).supabase_url || secrets.SUPABASE_URL }}
-          SUPABASE_ANON_KEY: ${{ fromJson(inputs.context).anon_key || secrets.SUPABASE_ANON_KEY }}
-          CALLBACK_TOKEN: ${{ fromJson(inputs.context).callback_token || secrets.CALLBACK_TOKEN }}
+          SUPABASE_URL: ${{ inputs.supabase_url || secrets.SUPABASE_URL }}
+          SUPABASE_ANON_KEY: ${{ inputs.anon_key || secrets.SUPABASE_ANON_KEY }}
+          CALLBACK_TOKEN: ${{ inputs.callback_token || secrets.CALLBACK_TOKEN }}
+          CALLBACK_URL_INPUT: ${{ inputs.callback_url }}
         run: |
           START_TIME=$(date +%s)
 
@@ -75,7 +96,7 @@ jobs:
 
           echo "Execution completed with status: $STATUS (duration: ${DURATION}s)"
 
-          CALLBACK_URL=$(echo "$INPUT_CONTEXT" | jq -r '.callback_url // "https://[need-config]/rest/v1/rpc/handle_github_action_callback"')
+          CALLBACK_URL=$(echo "$INPUT_CONTEXT" | jq -r --arg cb "$CALLBACK_URL_INPUT" 'if ($cb != null and $cb != "") then $cb else (.callback_url // "https://[need-config]/rest/v1/rpc/handle_github_action_callback") end')
           if [ -n "$SUPABASE_URL" ] && [ -n "$SUPABASE_ANON_KEY" ] && [ "$CALLBACK_URL" != "null" ]; then
             echo "Sending callback to Supabase RPC..."
 
