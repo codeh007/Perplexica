@@ -1,3 +1,4 @@
+
 name: Script Runner
 
 on:
@@ -19,7 +20,6 @@ jobs:
     timeout-minutes: 10
     steps:
       - name: Setup SSH Agent (if needed)
-        # 仅当 context 明确指定需要 SSH 时才设置（精确匹配 JSON 字段）
         if: contains(inputs.context, '"requires_ssh":true')
         uses: webfactory/ssh-agent@v0.9.0
         with:
@@ -29,19 +29,16 @@ jobs:
         env:
           INPUT_SCRIPT: ${{ inputs.script }}
           INPUT_CONTEXT: ${{ inputs.context }}
-          # 优先使用 inputs.context 中传递的值，否则使用 secrets
           SUPABASE_URL: ${{ fromJson(inputs.context).supabase_url || secrets.SUPABASE_URL }}
           SUPABASE_ANON_KEY: ${{ fromJson(inputs.context).anon_key || secrets.SUPABASE_ANON_KEY }}
           CALLBACK_TOKEN: ${{ fromJson(inputs.context).callback_token || secrets.CALLBACK_TOKEN }}
         run: |
           START_TIME=$(date +%s)
 
-          # Write script to file securely
           SCRIPT_FILE=$(mktemp /tmp/gomtm-exec-XXXXXX.sh)
           echo "$INPUT_SCRIPT" > "$SCRIPT_FILE"
           chmod +x "$SCRIPT_FILE"
 
-          # Execute and capture output (both stdout and stderr)
           set +e
           OUTPUT=$(bash "$SCRIPT_FILE" 2>&1)
           EXIT_CODE=$?
@@ -50,7 +47,6 @@ jobs:
           END_TIME=$(date +%s)
           DURATION=$((END_TIME - START_TIME))
 
-          # Prepare result fields based on CodeRunResult schema
           if [ $EXIT_CODE -eq 0 ]; then
             STATUS="success"
             ERROR=""
@@ -59,12 +55,10 @@ jobs:
             ERROR="Script execution failed with exit code $EXIT_CODE"
           fi
 
-          # Safely ensure context is valid JSON (fallback to empty object)
           if ! jq -e . >/dev/null 2>&1 <<<"$INPUT_CONTEXT"; then
             INPUT_CONTEXT="{}"
           fi
 
-          # Construct CodeRunResult payload
           PAYLOAD=$(jq -n \
             --arg status "$STATUS" \
             --arg error "$ERROR" \
@@ -81,35 +75,42 @@ jobs:
 
           echo "Execution completed with status: $STATUS (duration: ${DURATION}s)"
 
-          # Send result via Supabase PostgREST RPC
-          # 优先使用 context 中的 callback_url，否则默认使用 handle_github_action_callback
           CALLBACK_URL=$(echo "$INPUT_CONTEXT" | jq -r '.callback_url // "https://[need-config]/rest/v1/rpc/handle_github_action_callback"')
           if [ -n "$SUPABASE_URL" ] && [ -n "$SUPABASE_ANON_KEY" ] && [ "$CALLBACK_URL" != "null" ]; then
             echo "Sending callback to Supabase RPC..."
 
-            # 如果 callback_url 是完整 URL，直接使用；否则拼接
             if [[ "$CALLBACK_URL" == http* ]]; then
               RPC_URL="$CALLBACK_URL"
             else
               RPC_URL="${SUPABASE_URL}/rest/v1/rpc/${CALLBACK_URL}"
             fi
 
-            # 构建 RPC 请求体 (PostgREST 要求参数名与函数签名一致)
             RPC_BODY=$(jq -n \
               --arg token "$CALLBACK_TOKEN" \
               --argjson payload "$PAYLOAD" \
               '{ "p_token": $token, "p_payload": $payload }')
 
-            HTTP_STATUS=$(curl -s -o /dev/null -w "%{http_code}" \
+            HTTP_RESPONSE=$(curl -sS \
               -X POST "$RPC_URL" \
               -H "Content-Type: application/json" \
               -H "apikey: ${SUPABASE_ANON_KEY}" \
-              -d "$RPC_BODY")
+              -H "Authorization: Bearer ${SUPABASE_ANON_KEY}" \
+              -d "$RPC_BODY" \
+              -w '\nHTTP_STATUS:%{http_code}')
+
+            HTTP_STATUS=$(echo "$HTTP_RESPONSE" | sed -n 's/^HTTP_STATUS://p')
+            RESPONSE_BODY=$(echo "$HTTP_RESPONSE" | sed '/^HTTP_STATUS:/d')
 
             echo "Callback responded with HTTP status $HTTP_STATUS"
+
+            if [ -z "$HTTP_STATUS" ] || [ "$HTTP_STATUS" -lt 200 ] || [ "$HTTP_STATUS" -ge 300 ]; then
+              echo "Callback failed with status $HTTP_STATUS"
+              echo "Response: $RESPONSE_BODY"
+              exit 1
+            fi
           else
             echo "Warning: SUPABASE_URL, SUPABASE_ANON_KEY or CALLBACK_URL are not set. Skipping callback."
+            exit 1
           fi
 
-          # Exit with original script's exit code
           exit $EXIT_CODE
