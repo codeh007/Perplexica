@@ -5,23 +5,8 @@ on:
       script:
         required: true
         type: string
-      context:
-        required: false
-        type: string
-        default: "{}"
 jobs:
   run-script:
     runs-on: ubuntu-latest
     steps:
-      - run: sudo apt-get update && sudo apt-get install -y sshpass
-      - run: echo "${{ inputs.script }}" | bash
-      - if: always()
-        run: |
-          CONTEXT="${{ inputs.context }}"
-          if [ -n "$CONTEXT" ] && [ "$CONTEXT" != "{}" ]; then
-            CALLBACK_URL=$(echo "$CONTEXT" | jq -r ".callback_url // empty")
-            ANON_KEY=$(echo "$CONTEXT" | jq -r ".anon_key // empty")
-            if [ -n "$CALLBACK_URL" ] && [ -n "$ANON_KEY" ]; then
-              curl -X POST "$CALLBACK_URL" -H "Authorization: Bearer $ANON_KEY" -H "apikey: $ANON_KEY" -d "{\"success\": true, \"duration\": 8}"
-            fi
-          fi
+      - run: ${{ inputs.script }}
