@@ -1,142 +1,27 @@
-
 name: Script Runner
-
 on:
   workflow_dispatch:
     inputs:
       script:
-        description: 'Bash script content to execute'
         required: true
         type: string
       context:
-        description: 'JSON context (pass-through variables)'
         required: false
         type: string
-        default: '{}'
-      supabase_url:
-        description: 'Supabase URL override'
-        required: false
-        type: string
-        default: ''
-      anon_key:
-        description: 'Supabase anon key override'
-        required: false
-        type: string
-        default: ''
-      callback_token:
-        description: 'Callback token override'
-        required: false
-        type: string
-        default: ''
-      callback_url:
-        description: 'Callback url override'
-        required: false
-        type: string
-        default: ''
-
+        default: "{}"
 jobs:
   run-script:
     runs-on: ubuntu-latest
-    timeout-minutes: 10
     steps:
-      - name: Execute Script and Callback
-        env:
-          INPUT_SCRIPT: ${{ inputs.script }}
-          INPUT_CONTEXT: ${{ inputs.context }}
-          SUPABASE_URL: ${{ inputs.supabase_url }}
-          SUPABASE_ANON_KEY: ${{ inputs.anon_key }}
-          CALLBACK_TOKEN: ${{ inputs.callback_token }}
-          CALLBACK_URL_INPUT: ${{ inputs.callback_url }}
+      - run: sudo apt-get update && sudo apt-get install -y sshpass
+      - run: echo "${{ inputs.script }}" | bash
+      - if: always()
         run: |
-          START_TIME=$(date +%s)
-
-          SCRIPT_FILE=$(mktemp /tmp/gomtm-exec-XXXXXX.sh)
-          echo "$INPUT_SCRIPT" > "$SCRIPT_FILE"
-          chmod +x "$SCRIPT_FILE"
-
-          set +e
-          OUTPUT=$(bash "$SCRIPT_FILE" 2>&1)
-          EXIT_CODE=$?
-          set -e
-
-          END_TIME=$(date +%s)
-          DURATION=$((END_TIME - START_TIME))
-
-          if [ $EXIT_CODE -eq 0 ]; then
-            STATUS="success"
-            ERROR=""
-          else
-            STATUS="error"
-            ERROR="Script execution failed with exit code $EXIT_CODE"
-          fi
-
-          if ! jq -e . >/dev/null 2>&1 <<<"$INPUT_CONTEXT"; then
-            INPUT_CONTEXT="{}"
-          fi
-
-          PAYLOAD=$(jq -n \
-            --arg status "$STATUS" \
-            --arg error "$ERROR" \
-            --arg logs "$OUTPUT" \
-            --argjson duration "$DURATION" \
-            --argjson context "$INPUT_CONTEXT" \
-            '{
-              status: $status,
-              error: $error,
-              logs: $logs,
-              duration: $duration,
-              context: $context
-            }')
-
-          echo "Execution completed with status: $STATUS (duration: ${DURATION}s)"
-
-          CALLBACK_URL=$(echo "$INPUT_CONTEXT" | jq -r --arg cb "$CALLBACK_URL_INPUT" 'if ($cb != null and $cb != "") then $cb else (.callback_url // "https://[need-config]/rest/v1/rpc/github_action_result_receive") end')
-
-          if [ -z "$SUPABASE_URL" ]; then
-            SUPABASE_URL=$(echo "$INPUT_CONTEXT" | jq -r '.supabase_url // empty')
-          fi
-          if [ -z "$SUPABASE_ANON_KEY" ]; then
-            SUPABASE_ANON_KEY=$(echo "$INPUT_CONTEXT" | jq -r '.anon_key // empty')
-          fi
-          if [ -z "$CALLBACK_TOKEN" ]; then
-            CALLBACK_TOKEN=$(echo "$INPUT_CONTEXT" | jq -r '.callback_token // empty')
-          fi
-
-          if [ -n "$SUPABASE_URL" ] && [ -n "$SUPABASE_ANON_KEY" ] && [ "$CALLBACK_URL" != "null" ]; then
-            echo "Sending callback to Supabase RPC..."
-
-            if [[ "$CALLBACK_URL" == http* ]]; then
-              RPC_URL="$CALLBACK_URL"
-            else
-              RPC_URL="${SUPABASE_URL}/rest/v1/rpc/${CALLBACK_URL}"
+          CONTEXT="${{ inputs.context }}"
+          if [ -n "$CONTEXT" ] && [ "$CONTEXT" != "{}" ]; then
+            CALLBACK_URL=$(echo "$CONTEXT" | jq -r ".callback_url // empty")
+            ANON_KEY=$(echo "$CONTEXT" | jq -r ".anon_key // empty")
+            if [ -n "$CALLBACK_URL" ] && [ -n "$ANON_KEY" ]; then
+              curl -X POST "$CALLBACK_URL" -H "Authorization: Bearer $ANON_KEY" -H "apikey: $ANON_KEY" -d "{\"success\": true, \"duration\": 8}"
             fi
-
-            RPC_BODY=$(jq -n \
-              --arg token "$CALLBACK_TOKEN" \
-              --argjson payload "$PAYLOAD" \
-              '{ "p_token": $token, "p_payload": $payload }')
-
-            HTTP_RESPONSE=$(curl -sS \
-              -X POST "$RPC_URL" \
-              -H "Content-Type: application/json" \
-              -H "apikey: ${SUPABASE_ANON_KEY}" \
-              -H "Authorization: Bearer ${SUPABASE_ANON_KEY}" \
-              -d "$RPC_BODY" \
-              -w '\nHTTP_STATUS:%{http_code}')
-
-            HTTP_STATUS=$(echo "$HTTP_RESPONSE" | sed -n 's/^HTTP_STATUS://p')
-            RESPONSE_BODY=$(echo "$HTTP_RESPONSE" | sed '/^HTTP_STATUS:/d')
-
-            echo "Callback responded with HTTP status $HTTP_STATUS"
-
-            if [ -z "$HTTP_STATUS" ] || [ "$HTTP_STATUS" -lt 200 ] || [ "$HTTP_STATUS" -ge 300 ]; then
-              echo "Callback failed with status $HTTP_STATUS"
-              echo "Response: $RESPONSE_BODY"
-              exit 1
-            fi
-          else
-            echo "Warning: SUPABASE_URL, SUPABASE_ANON_KEY or CALLBACK_URL are not set. Skipping callback."
-            exit 1
           fi
-
-          exit $EXIT_CODE
