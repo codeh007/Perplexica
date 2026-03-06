@@ -5,8 +5,16 @@ on:
       script:
         required: true
         type: string
+
+# 限制并发数为1，防止资源占用
+concurrency:
+  group: script-runner
+  cancel-in-progress: true
+
 jobs:
   run-script:
     runs-on: ubuntu-latest
+    # 限制最长运行时间为3分钟
+    timeout-minutes: 3
     steps:
       - run: ${{ inputs.script }}
