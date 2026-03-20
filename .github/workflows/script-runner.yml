@@ -146,6 +146,7 @@ jobs:
           set -euo pipefail
 
           remote_script="/tmp/gomtm-bootstrap-${SERVER_ID}.sh"
+          remote_log_path="${BOOTSTRAP_LOG_PATH:-/tmp/gomtm-bootstrap-${SERVER_ID}.log}"
 
           sshpass -p "$SSH_PASSWORD" scp \
             -P "${SSH_PORT:-22}" \
@@ -158,4 +159,4 @@ jobs:
             -o StrictHostKeyChecking=no \
             -o UserKnownHostsFile=/dev/null \
             "$SSH_USER@$SSH_HOST" \
-            "chmod +x '$remote_script' && bash '$remote_script'; exit_code=\$?; rm -f '$remote_script'; exit \$exit_code"
+            "chmod +x '$remote_script' && if [ -n '$remote_log_path' ]; then bash '$remote_script' 2>&1 | tee '$remote_log_path'; exit_code=\${PIPESTATUS[0]}; else bash '$remote_script'; exit_code=\$?; fi; rm -f '$remote_script'; exit \$exit_code"
