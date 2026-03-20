@@ -1,34 +1,55 @@
+
 name: Script Runner
 
 on:
   workflow_dispatch:
     inputs:
       script:
-        description: Legacy rollout fallback script
+        description: Legacy direct bash fallback
         required: false
         type: string
       server_id:
         description: Target server UUID
         required: false
         type: string
-      lifecycle_action:
-        description: Lifecycle action (start/status/stop/restart)
+      bootstrap_script_rpc:
+        description: RPC name used to fetch bootstrap bash
         required: false
         type: string
-      context_rpc:
-        description: Supabase lifecycle context RPC name
+      callback_token:
+        description: Bootstrap callback token
         required: false
         type: string
-      result_rpc:
-        description: Supabase lifecycle result RPC name
+      supabase_url:
+        description: Supabase project URL
         required: false
         type: string
-      runner_selector:
-        description: Compute node UUID used to resolve SSH target
+      supabase_anon_key:
+        description: Supabase anon key
         required: false
         type: string
-      gomtm_version:
-        description: Pinned gomtm npm version
+      ssh_target:
+        description: Optional user@host:port target hint
+        required: false
+        type: string
+      ssh_host:
+        description: SSH host
+        required: false
+        type: string
+      ssh_port:
+        description: SSH port
+        required: false
+        type: string
+      ssh_user:
+        description: SSH username
+        required: false
+        type: string
+      ssh_password:
+        description: SSH password
+        required: false
+        type: string
+      bootstrap_log_path:
+        description: Optional remote bootstrap log path
         required: false
         type: string
 
@@ -41,15 +62,18 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 10
     env:
-      SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
-      SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
       LEGACY_SCRIPT: ${{ inputs.script }}
       SERVER_ID: ${{ inputs.server_id }}
-      LIFECYCLE_ACTION: ${{ inputs.lifecycle_action }}
-      CONTEXT_RPC: ${{ inputs.context_rpc }}
-      RESULT_RPC: ${{ inputs.result_rpc }}
-      RUNNER_SELECTOR: ${{ inputs.runner_selector }}
-      GOMTM_VERSION: ${{ inputs.gomtm_version }}
+      BOOTSTRAP_SCRIPT_RPC: ${{ inputs.bootstrap_script_rpc }}
+      CALLBACK_TOKEN: ${{ inputs.callback_token }}
+      SUPABASE_URL: ${{ inputs.supabase_url }}
+      SUPABASE_ANON_KEY: ${{ inputs.supabase_anon_key }}
+      SSH_TARGET: ${{ inputs.ssh_target }}
+      SSH_HOST: ${{ inputs.ssh_host }}
+      SSH_PORT: ${{ inputs.ssh_port }}
+      SSH_USER: ${{ inputs.ssh_user }}
+      SSH_PASSWORD: ${{ inputs.ssh_password }}
+      BOOTSTRAP_LOG_PATH: ${{ inputs.bootstrap_log_path }}
     steps:
       - name: Select execution mode
         id: mode
@@ -57,179 +81,81 @@ jobs:
         run: |
           set -euo pipefail
 
-          if [[ -n "${LEGACY_SCRIPT}" && -z "${LIFECYCLE_ACTION}" ]]; then
+          if [[ -n "${LEGACY_SCRIPT}" ]]; then
             printf 'mode=legacy\n' >> "$GITHUB_OUTPUT"
             exit 0
           fi
 
-          for name in SERVER_ID LIFECYCLE_ACTION CONTEXT_RPC RESULT_RPC RUNNER_SELECTOR GOMTM_VERSION SUPABASE_URL SUPABASE_SERVICE_ROLE_KEY; do
+          for name in SERVER_ID BOOTSTRAP_SCRIPT_RPC CALLBACK_TOKEN SUPABASE_URL SUPABASE_ANON_KEY SSH_HOST SSH_USER SSH_PASSWORD; do
             if [[ -z "${!name:-}" ]]; then
-              printf 'missing required input or secret: %s\n' "$name" >&2
+              printf 'missing required input: %s\n' "$name" >&2
               exit 1
             fi
           done
 
-          printf 'mode=lifecycle\n' >> "$GITHUB_OUTPUT"
+          if [[ -z "${SSH_PORT:-}" ]]; then
+            printf 'SSH_PORT=22\n' >> "$GITHUB_ENV"
+          fi
 
-      - name: Legacy script fallback
+          printf 'mode=bootstrap\n' >> "$GITHUB_OUTPUT"
+
+      - name: Legacy direct bash fallback
         if: steps.mode.outputs.mode == 'legacy'
-        run: ${{ inputs.script }}
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          bash -lc "$LEGACY_SCRIPT"
 
       - name: Install workflow dependencies
-        if: steps.mode.outputs.mode == 'lifecycle'
+        if: steps.mode.outputs.mode == 'bootstrap'
         shell: bash
         run: |
           set -euo pipefail
           sudo apt-get update
           sudo apt-get install -y sshpass
 
-      - name: Fetch lifecycle context
-        if: steps.mode.outputs.mode == 'lifecycle'
+      - name: Fetch bootstrap bash
+        if: steps.mode.outputs.mode == 'bootstrap'
         shell: bash
         run: |
           set -euo pipefail
 
           response_file="$(mktemp)"
-          payload="$(jq -cn --arg p_id "$SERVER_ID" --arg p_action "$LIFECYCLE_ACTION" '{p_id:$p_id,p_action:$p_action}')"
+          payload="$(python3 -c 'import json, os; print(json.dumps({"p_server_id": os.environ["SERVER_ID"], "p_callback_token": os.environ["CALLBACK_TOKEN"]}))')"
+
           http_code="$(curl -sS -o "$response_file" -w '%{http_code}' \
-            "$SUPABASE_URL/rest/v1/rpc/$CONTEXT_RPC" \
-            -H "apikey: $SUPABASE_SERVICE_ROLE_KEY" \
-            -H "Authorization: Bearer $SUPABASE_SERVICE_ROLE_KEY" \
+            "$SUPABASE_URL/rest/v1/rpc/$BOOTSTRAP_SCRIPT_RPC" \
+            -H "apikey: $SUPABASE_ANON_KEY" \
+            -H "Authorization: Bearer $SUPABASE_ANON_KEY" \
             -H "Content-Type: application/json" \
             -d "$payload")"
 
           if [[ "$http_code" != "200" ]]; then
-            printf 'context_rpc_failed http=%s\n' "$http_code" >&2
-            jq -c . "$response_file" >&2 || tr -d '\n' < "$response_file" >&2
+            printf 'bootstrap_script_rpc_failed http=%s\n' "$http_code" >&2
+            python3 -c 'import pathlib, sys; print(pathlib.Path(sys.argv[1]).read_text(), end="")' "$response_file" >&2
             exit 1
           fi
 
-          jq -e 'type == "object"' "$response_file" >/dev/null
-          cp "$response_file" context.json
+          python3 -c 'import json, pathlib, sys; raw = pathlib.Path(sys.argv[1]).read_text(); value = json.loads(raw); assert isinstance(value, str) and value.strip(), "bootstrap script rpc did not return non-empty bash text"; print(value, end="")' "$response_file" > bootstrap.sh
+          chmod +x bootstrap.sh
 
-      - name: Fetch compute node secret
-        if: steps.mode.outputs.mode == 'lifecycle'
+      - name: Run bootstrap bash over SSH
+        if: steps.mode.outputs.mode == 'bootstrap'
         shell: bash
         run: |
           set -euo pipefail
 
-          response_file="$(mktemp)"
-          payload="$(jq -cn --arg target_id "$RUNNER_SELECTOR" '{target_id:$target_id}')"
-          http_code="$(curl -sS -o "$response_file" -w '%{http_code}' \
-            "$SUPABASE_URL/rest/v1/rpc/compute_node_get_secret" \
-            -H "apikey: $SUPABASE_SERVICE_ROLE_KEY" \
-            -H "Authorization: Bearer $SUPABASE_SERVICE_ROLE_KEY" \
-            -H "Content-Type: application/json" \
-            -d "$payload")"
+          remote_script="/tmp/gomtm-bootstrap-${SERVER_ID}.sh"
 
-          if [[ "$http_code" != "200" ]]; then
-            printf 'compute_node_secret_failed http=%s\n' "$http_code" >&2
-            jq -c . "$response_file" >&2 || tr -d '\n' < "$response_file" >&2
-            exit 1
-          fi
-
-          jq -e 'type == "array" and length > 0 and .[0].host != null and .[0].username != null and .[0].auth_secret != null' "$response_file" >/dev/null
-          jq '.[0]' "$response_file" > compute-node.json
-
-      - name: Run gomtm lifecycle via SSH
-        if: steps.mode.outputs.mode == 'lifecycle'
-        id: lifecycle
-        shell: bash
-        run: |
-          set -euo pipefail
-
-          ssh_host="$(jq -r '.host' compute-node.json)"
-          ssh_port="$(jq -r '.port // 22' compute-node.json)"
-          ssh_user="$(jq -r '.username' compute-node.json)"
-          ssh_password="$(jq -r '.auth_secret' compute-node.json)"
-
-          instance_id="$(jq -r '.instance_id' context.json)"
-          state_dir="$(jq -r '.state_dir' context.json)"
-          public_url="$(jq -r '.public_url // ""' context.json)"
-          container_name="$(jq -r '.container_name' context.json)"
-          image="$(jq -r '.image' context.json)"
-          startup_deadline_seconds="$(jq -r '.startup_deadline_seconds // 120' context.json)"
-          tunnel_token="$(jq -r '.tunnel_token // ""' context.json)"
-          context_supabase_url="$(jq -r '.supabase_url' context.json)"
-          context_supabase_anon_key="$(jq -r '.supabase_anon_key' context.json)"
-
-          remote_script="$(mktemp)"
-          cat > "$remote_script" <<'EOF'
-          set -euo pipefail
-          workdir="$(mktemp -d /tmp/gomtm-lifecycle.XXXXXX)"
-          trap 'rm -rf "$workdir"' EXIT
-          curl -sSfL "https://registry.npmjs.org/gomtm/-/gomtm-$GOMTM_VERSION.tgz" -o "$workdir/gomtm.tgz"
-          tar -xzf "$workdir/gomtm.tgz" -C "$workdir"
-          chmod +x "$workdir/package/bin/gomtm"
-          export CLOUDFLARED_TOKEN="$TUNNEL_TOKEN"
-          export SUPABASE_URL="$CONTEXT_SUPABASE_URL"
-          export SUPABASE_ANON_KEY="$CONTEXT_SUPABASE_ANON_KEY"
-          export SUPABASE_SERVICE_ROLE_KEY="$SUPABASE_SERVICE_ROLE_KEY"
-          "$workdir/package/bin/gomtm" lifecycle "$LIFECYCLE_ACTION" \
-            --instance-id "$INSTANCE_ID" \
-            --state-dir "$STATE_DIR" \
-            --public-url "$PUBLIC_URL" \
-            --container-name "$CONTAINER_NAME" \
-            --image "$IMAGE" \
-            --startup-deadline-seconds "$STARTUP_DEADLINE_SECONDS"
-          EOF
-
-          sshpass -p "$ssh_password" scp \
-            -P "$ssh_port" \
+          sshpass -p "$SSH_PASSWORD" scp \
+            -P "${SSH_PORT:-22}" \
             -o StrictHostKeyChecking=no \
             -o UserKnownHostsFile=/dev/null \
-            "$remote_script" "$ssh_user@$ssh_host:/tmp/gomtm-lifecycle-run.sh"
+            bootstrap.sh "$SSH_USER@$SSH_HOST:$remote_script"
 
-          set +e
-          sshpass -p "$ssh_password" ssh \
-            -p "$ssh_port" \
+          sshpass -p "$SSH_PASSWORD" ssh \
+            -p "${SSH_PORT:-22}" \
             -o StrictHostKeyChecking=no \
             -o UserKnownHostsFile=/dev/null \
-            "$ssh_user@$ssh_host" \
-            "chmod +x /tmp/gomtm-lifecycle-run.sh && GOMTM_VERSION=$(printf '%q' "$GOMTM_VERSION") LIFECYCLE_ACTION=$(printf '%q' "$LIFECYCLE_ACTION") INSTANCE_ID=$(printf '%q' "$instance_id") STATE_DIR=$(printf '%q' "$state_dir") PUBLIC_URL=$(printf '%q' "$public_url") CONTAINER_NAME=$(printf '%q' "$container_name") IMAGE=$(printf '%q' "$image") STARTUP_DEADLINE_SECONDS=$(printf '%q' "$startup_deadline_seconds") TUNNEL_TOKEN=$(printf '%q' "$tunnel_token") CONTEXT_SUPABASE_URL=$(printf '%q' "$context_supabase_url") CONTEXT_SUPABASE_ANON_KEY=$(printf '%q' "$context_supabase_anon_key") SUPABASE_SERVICE_ROLE_KEY=$(printf '%q' "$SUPABASE_SERVICE_ROLE_KEY") /tmp/gomtm-lifecycle-run.sh; exit_code=\$?; rm -f /tmp/gomtm-lifecycle-run.sh; exit \$exit_code" \
-            > lifecycle.stdout 2> lifecycle.stderr
-          lifecycle_exit=$?
-          set -e
-
-          if [[ ! -s lifecycle.stdout ]]; then
-            printf 'remote_lifecycle_failed_without_json exit=%s\n' "$lifecycle_exit" >&2
-            tr -d '\n' < lifecycle.stderr >&2 || true
-            exit "$lifecycle_exit"
-          fi
-
-          result_json="$(sed -n '1p' lifecycle.stdout)"
-          printf '%s\n' "$result_json" > lifecycle-result.json
-          jq -e 'type == "object" and .status != null' lifecycle-result.json >/dev/null
-
-          printf 'lifecycle_exit=%s\n' "$lifecycle_exit" >> "$GITHUB_OUTPUT"
-
-      - name: Report lifecycle result
-        if: steps.mode.outputs.mode == 'lifecycle'
-        shell: bash
-        run: |
-          set -euo pipefail
-
-          payload="$(jq -cn --arg p_id "$SERVER_ID" --arg p_action "$LIFECYCLE_ACTION" --slurpfile p_result lifecycle-result.json '{p_id:$p_id,p_action:$p_action,p_result:$p_result[0]}')"
-          response_file="$(mktemp)"
-          http_code="$(curl -sS -o "$response_file" -w '%{http_code}' \
-            "$SUPABASE_URL/rest/v1/rpc/$RESULT_RPC" \
-            -H "apikey: $SUPABASE_SERVICE_ROLE_KEY" \
-            -H "Authorization: Bearer $SUPABASE_SERVICE_ROLE_KEY" \
-            -H "Content-Type: application/json" \
-            -d "$payload")"
-
-          if [[ "$http_code" != "200" ]]; then
-            printf 'result_report_failed http=%s\n' "$http_code" >&2
-            jq -c . "$response_file" >&2 || tr -d '\n' < "$response_file" >&2
-            exit 1
-          fi
-
-          jq -e 'type == "object"' "$response_file" >/dev/null
-
-      - name: Propagate lifecycle failure
-        if: steps.mode.outputs.mode == 'lifecycle' && steps.lifecycle.outputs.lifecycle_exit != '0'
-        shell: bash
-        run: |
-          set -euo pipefail
-          printf 'lifecycle command exited with %s\n' '${{ steps.lifecycle.outputs.lifecycle_exit }}' >&2
-          exit 1
+            "$SSH_USER@$SSH_HOST" \
+            "chmod +x '$remote_script' && bash '$remote_script'; exit_code=\$?; rm -f '$remote_script'; exit \$exit_code"
